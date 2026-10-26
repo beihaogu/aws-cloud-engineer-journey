@@ -206,3 +206,59 @@ Created the `Properties` table with `L_ListingID` as the partition key
 
 ## Decision guide
 See [`decision-guide.md`](decision-guide.md).
+
+# Week 5 — VPC & Bastion Host
+
+Region: us-east-2. Diagram: `vpc-diagram.png`. Proof: `bastion-hop.png`.
+
+## What was built (Lab 5.1)
+`training-vpc` (10.0.0.0/16) via the "VPC and more" wizard: 2 AZs, 2 public
+subnets, 2 private subnets, one Internet Gateway, one NAT Gateway in a single
+AZ (cost), and two route tables:
+
+- **public route table** — `0.0.0.0/0 → igw`, associated with both public subnets
+- **private route table** — `0.0.0.0/0 → nat`, associated with both private subnets
+
+"Public" and "private" are not properties of a subnet; they are consequences
+of which route table it is associated with and whether instances get a public
+IP.
+
+## Bastion pattern (Lab 5.2)
+- `bastion` — t3.micro in public-subnet-1, public IP, SG `bastion-sg`
+  allowing SSH only from my IP.
+- `private-box` — t3.micro in private-subnet-1, **no public IP**, SG
+  `private-sg` allowing SSH only from `bastion-sg` (a security-group
+  reference, not an IP).
+
+Used SSH agent forwarding so the private key never left my laptop:
+
+```bash
+ssh-add ~/.ssh/training-key.pem
+ssh -A ec2-user@<bastion-public-ip>
+ssh ec2-user@10.0.132.0        # from inside the bastion
+```
+
+## Traffic path, laptop → private instance
+1. Laptop → Internet → **Internet Gateway** (VPC edge)
+2. IGW → bastion's public IP, allowed by `bastion-sg` (port 22, my IP only)
+3. From the bastion, SSH to `10.0.132.0` over the VPC's internal network —
+   same VPC, so no routing beyond the local `10.0.0.0/16` route is needed;
+   allowed by `private-sg` because the source is `bastion-sg`
+4. Replies return along the same path; security groups are stateful, so no
+   outbound rules were needed
+
+## Private instance → Internet (Debug 5.3 check)
+`sudo dnf update -y` on `private-box` succeeded. Its route table sends
+`0.0.0.0/0` to the NAT Gateway, which sits in the public subnet and has an
+Elastic IP; the NAT forwards the request out through the IGW and maps the
+reply back. The instance can reach the internet but nothing on the internet
+can initiate a connection to it.
+
+If this had failed, the first thing to check is the **Subnet associations**
+tab of the private route table — a subnet that was never explicitly
+associated falls back to the main route table, which has no NAT route.
+
+## Cleanup
+Terminated both instances, deleted the NAT Gateway, released its Elastic IP,
+then deleted the VPC (which removed subnets and route tables). NAT Gateways
+bill hourly whether used or not.
