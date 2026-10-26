@@ -85,3 +85,124 @@ resources shared with external principals.
   applicable policy grants access — unless any explicit Deny applies anywhere
   in the chain (SCP → resource policy → permissions boundary → identity
   policy), in which case the request is denied regardless.
+
+# Week 3 — Runbook: Deploying PropertyLite to EC2
+
+Region: us-east-2 (account is pinned here; handbook uses us-east-1).
+
+## 1. Launch the instance
+
+EC2 → Launch instance, with:
+
+- **Name:** `property-api-01`
+- **AMI:** Amazon Linux 2023 (free-tier eligible)
+- **Instance type:** `t3.micro`
+- **Key pair:** created `training-key` (RSA, `.pem`), moved to `~/.ssh/` and
+  `chmod 400` so SSH will accept it. AWS keeps only the public key; the `.pem`
+  is the private half and cannot be re-downloaded.
+- **Security group:** two inbound rules —
+  - SSH, port 22, source = My IP
+  - Custom TCP, port 8080, source = 0.0.0.0/0 (PropertyLite listens on 8080,
+    not 80)
+- **User data:** the bootstrap script in `user-data.sh` (see below)
+
+## 2. Bootstrap script (user data)
+
+EC2 runs user data once, as root, on first boot. The script installs Python
+and Flask, writes `app.py` and the sample CSV to `/opt/property-api/`, and
+starts the app in the background with `nohup`, logging to
+`/var/log/property-api.log`. Nothing is installed by hand — the instance is
+self-contained from the moment it boots, which is what makes the same script
+reusable in a launch template (Week 6).
+
+## 3. Verify from the laptop
+
+Waited ~3 minutes for status checks to pass, then from my machine:
+
+```bash
+curl http://<public-ip>:8080/health
+# {"status":"ok"}
+
+curl http://<public-ip>:8080/properties/R100234
+# {"L_City":"Sacramento","L_Keyword2":"3", ...}
+```
+
+Screenshot: `curl-responses.png`.
+
+Why this works: the app binds to `0.0.0.0:8080`, the security group allows
+8080 from anywhere, and the instance has a public IPv4. Remove any one of the
+three and the request times out.
+
+## 4. SSH in
+
+```bash
+ssh -i ~/.ssh/training-key.pem ec2-user@<public-ip>
+cat /var/log/property-api.log
+```
+
+Confirmed Flask was serving on 8080 and the two curl requests appeared in the
+log.
+
+## 5. EBS snapshot (Lab 3.2)
+
+EC2 → Volumes → selected the instance's 8 GB root volume → Create snapshot.
+Status reached **completed** within a couple of minutes
+(`snapshot-completed.png`).
+
+A snapshot is a point-in-time copy of the volume stored in S3. Creating a new
+volume from it would give a disk identical to this one at the moment the
+snapshot was taken — the same mechanism used for backup/restore in Week 12.
+
+## 6. Cleanup
+
+- Terminated `property-api-01` (Terminate, not Stop — a stopped instance still
+  bills for its volume)
+- Confirmed the root volume was deleted with the instance
+- Deleted the snapshot
+
+## Terms
+
+- **EC2** — a virtual machine.
+- **EBS volume** — a network-attached disk; the instance's root disk is one.
+- **Snapshot** — a backup of a volume at one point in time.
+- **Security group** — the instance's stateful firewall (inbound rules only
+  needed; replies are allowed automatically).
+- **User data** — a script EC2 runs as root on first boot.
+
+
+# Week 4 — Storage & Databases
+
+Region: us-east-2.
+
+## Lab 4.1 — S3 + lifecycle
+Created `my-training-bucket-beihao`, uploaded a file, added a rule moving
+all objects to Glacier Flexible Retrieval after 30 days
+(`lifecycle-rule.png`).
+
+Also used this bucket to re-test the Week 2 least-privilege user. The first
+`aws s3 cp --profile s3test` failed with AccessDenied: the policy's Resource
+still contained the literal placeholder `my-training-bucket-<beihao>/*`
+from copying the handbook template. Fixed the ARN, and PutObject succeeded
+while ListBuckets is still denied — the policy now behaves exactly as
+intended. A single wrong character in an ARN is a silent full deny.
+
+## Lab 4.2 — RDS MySQL
+Created `training-db` (MySQL 8.0, free tier, not publicly accessible).
+Because the instance has no public endpoint, I launched a `db-client` EC2
+instance in the same VPC, added an inbound rule on the RDS security group
+allowing 3306 from the EC2 instance's security group (the Debug 4.4 fix),
+and connected from there with the mysql client.
+
+`rets_property.sql` was not distributed yet, so I created the
+`rets_property` table by hand with the Week 0 sample rows and ran the
+aggregate query (`rds-query.png`). The PII-drop and ID-remap steps will be
+applied when the real export is provided. Deleted the instance after the
+lab.
+
+## Lab 4.3 — DynamoDB
+Created the `Properties` table with `L_ListingID` as the partition key
+(on-demand billing), put one item, and read it back with `get-item`
+(`dynamodb-get-item.png`). Deleted the table after the lab.
+
+## Decision guide
+See [`decision-guide.md`](decision-guide.md).
